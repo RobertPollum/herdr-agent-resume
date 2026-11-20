@@ -36,6 +36,9 @@ Right after the key press, while the commands are typed into the restored shells
 
 ## Install
 
+Requires Herdr desktop 0.1.16 or newer. Running `herdr-app check` validates
+the popup without starting a resume pass.
+
 ```sh
 git clone https://github.com/thuanlm215/herdr-agent-resume
 python3 herdr-agent-resume/scripts/install.py

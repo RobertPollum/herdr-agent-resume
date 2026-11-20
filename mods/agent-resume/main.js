@@ -4,7 +4,7 @@
 // then says what came back in a toast and closes.
 import { View, div } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { exec, appHome, theme, props, closeOverlay, notify } from "herdr";
+import { checking, exec, appHome, theme, props, closeOverlay, notify } from "herdr";
 import { summary } from "./summary.js";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -12,6 +12,8 @@ const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "�
 export default class AgentResume extends View {
   init(_props, cx) {
     this.text = "Looking for agents to resume…";
+    // A check runs init too; only a real opening may resume sessions.
+    if (checking()) return;
     cx.spawn(async (cx) => {
       try {
         const script = `${appHome()}/mods/agent-resume/agent_resume.py`;

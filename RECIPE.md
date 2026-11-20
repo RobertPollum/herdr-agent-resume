@@ -1,5 +1,7 @@
 # Agent resume
 
+Requires Herdr desktop 0.1.16 or newer. A mod check does not start a resume pass.
+
 Restarting the machine kills every agent. Herdr brings each terminal back as a bare shell in its last folder, but it never runs the program again, so the chat that was running there is gone. This mod brings it back: a small session hook notes which session runs in which terminal, and Ctrl+Shift+R types that agent's resume command into each terminal that lost its agent and sits at a shell. A toast says what came back.
 
 ![Agent resume](preview.png)
