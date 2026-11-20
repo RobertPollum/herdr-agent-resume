@@ -98,6 +98,9 @@ KEEP_FLAGS = {
         "--agent": 1, "--model": 1, "--effort": 1, "--trust-tools": 1, "--mode": 1,
     },
 }
+# The variable that points an agent at another config folder (a second account, say).
+# A session started under one is only found again under the same one.
+HOME_VARS = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 MAX_ARGS = 64
 MAX_ARG_LEN = 1024
 AGENT_NAMES = set().union(*(a["names"] for a in AGENTS.values()))
@@ -403,6 +406,12 @@ def parse_label(labels):
         return None, "invalid session label: at must be a non-negative timestamp"
     if value.get("boot") is not None and not isinstance(value["boot"], str):
         return None, "invalid session label: boot must be text"
+    env = value.get("env")
+    if env is not None:
+        name = HOME_VARS.get(agent)
+        if (not isinstance(env, dict) or list(env) != [name] or not isinstance(env[name], str)
+                or not os.path.isabs(env[name]) or "\0" in env[name]):
+            return None, "invalid session label: env must name the agent's config folder"
     raw_args = value.get("args")
     value["args"] = flat(launch_flags(agent, raw_args)) if isinstance(raw_args, list) else []
     return value, None
@@ -509,6 +518,16 @@ def default_transcript(agent, session, cwd, home=None):
     return None
 
 
+def agent_home(agent, env):
+    """The config folder the agent runs under when the person chose one, or None."""
+    name = HOME_VARS.get(agent)
+    value = env.get(name) if name else None
+    if not isinstance(value, str) or not value:
+        return None
+    value = os.path.expanduser(value)
+    return value if os.path.isabs(value) and "\0" not in value else None
+
+
 def hook(agent, raw, env=None):
     """SessionStart: note the session on this terminal. Returns what it did, for the log."""
     env = os.environ if env is None else env
@@ -571,14 +590,18 @@ def hook(agent, raw, env=None):
             and label.get("pid") == agent_pid and label.get("shell") == shell):
         return "already noted"
 
-    remember(term, agent, session, cwd, transcript, agent_pid, shell)
+    remember(term, agent, session, cwd, transcript, agent_pid, shell, home=agent_home(agent, env))
     return "saved"
 
 
-def remember(term, agent, session, cwd, transcript, agent_pid, shell, watcher=True, launch_args=None):
-    """Label the terminal with the session (and the agent's launch flags) and start its watcher."""
+def remember(term, agent, session, cwd, transcript, agent_pid, shell, watcher=True, launch_args=None,
+             home=None):
+    """Label the terminal with the session (with the agent's launch flags and config
+    folder) and start its watcher."""
     label = {"agent": agent, "session": session, "cwd": cwd, "transcript": transcript,
              "pid": agent_pid, "shell": shell, "boot": boot_id(), "at": int(time.time() * 1000)}
+    if home and agent in HOME_VARS:
+        label["env"] = {HOME_VARS[agent]: home}
     argv = proc_argv(agent_pid) if launch_args is None else None
     if launch_args is not None or argv:
         label["args"] = flat(launch_flags(agent, launch_args if launch_args is not None else argv[1:]))
@@ -681,12 +704,15 @@ def starting_agent(terminal, agent):
 
 def resume_argv(label, typable_only=False):
     """The resume command as an argv: the agent's own resume words, then its launch
-    flags. `typable_only` leaves out flags with a value that can't go between single
-    quotes (a quote, a backslash, a control character)."""
+    flags, behind `env` when the session ran under its own config folder.
+    `typable_only` leaves out flags with a value that can't go between single quotes
+    (a quote, a backslash, a control character)."""
     groups = launch_flags(label["agent"], label.get("args") or [])
     if typable_only:
         groups = [g for g in groups if all(TYPABLE_ARG_RE.match(a) for a in g)]
-    return AGENTS[label["agent"]]["argv"](label["session"]) + flat(groups)
+    argv = AGENTS[label["agent"]]["argv"](label["session"]) + flat(groups)
+    env = label.get("env") or {}
+    return ["env", *(f"{k}={v}" for k, v in env.items()), *argv] if env else argv
 
 
 def _quote(arg):
@@ -694,9 +720,12 @@ def _quote(arg):
 
 
 def command(label):
-    """What to type, or None when the folder can't be typed safely."""
+    """What to type, or None when the folder (or the agent's config folder) can't be
+    typed safely."""
     cwd = label.get("cwd")
     if not isinstance(cwd, str) or not TYPABLE_PATH_RE.match(cwd):
+        return None
+    if any(not TYPABLE_PATH_RE.match(v) for v in (label.get("env") or {}).values()):
         return None
     if label["agent"] == "kiro":
         script = os.path.abspath(__file__)

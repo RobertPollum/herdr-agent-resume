@@ -97,6 +97,53 @@ class LabelTests(unittest.TestCase):
         self.assertIsNotNone(ar.read_label({ar.LABEL: json.dumps({**saved, "at": None, "boot": None})}))
 
 
+class ConfigFolderTests(unittest.TestCase):
+    """A session started under CLAUDE_CONFIG_DIR / CODEX_HOME (a second account) must
+    come back under the same folder, or the agent can't find it."""
+    HOME = "/home/u/.claude2"
+
+    def test_label_keeps_only_the_agents_own_variable(self):
+        found, problem = ar.parse_label({ar.LABEL: json.dumps({**label(), "env": {"CLAUDE_CONFIG_DIR": self.HOME}})})
+        self.assertIsNone(problem)
+        self.assertEqual(found["env"], {"CLAUDE_CONFIG_DIR": self.HOME})
+        bad = [{"CODEX_HOME": self.HOME}, {"CLAUDE_CONFIG_DIR": "rel/dir"}, {"CLAUDE_CONFIG_DIR": 3},
+               {"CLAUDE_CONFIG_DIR": self.HOME, "PATH": "/bin"}, "CLAUDE_CONFIG_DIR=/x", []]
+        for env in bad:
+            found, problem = ar.parse_label({ar.LABEL: json.dumps({**label(), "env": env})})
+            self.assertIsNone(found, repr(env))
+            self.assertIn("env", problem)
+        found, problem = ar.parse_label({ar.LABEL: json.dumps({**label(agent="grok"), "env": {"CLAUDE_CONFIG_DIR": self.HOME}})})
+        self.assertIsNone(found)
+
+    def test_resume_runs_under_the_same_folder(self):
+        lbl = {**label(), "env": {"CLAUDE_CONFIG_DIR": self.HOME}, "args": ["--model", "opus"]}
+        self.assertEqual(ar.command(lbl), f"cd '/work' && env CLAUDE_CONFIG_DIR={self.HOME} claude --resume {SID} --model opus")
+        self.assertEqual(ar.resume_argv(lbl)[:3], ["env", f"CLAUDE_CONFIG_DIR={self.HOME}", "claude"])
+        codex = {**label(agent="codex"), "env": {"CODEX_HOME": "/a b/.codex2"}}
+        self.assertEqual(ar.command(codex), f"cd '/work' && env 'CODEX_HOME=/a b/.codex2' codex resume {SID}")
+
+    def test_never_types_a_resume_that_drops_the_folder(self):
+        self.assertIsNone(ar.command({**label(), "env": {"CLAUDE_CONFIG_DIR": "/it's"}}))
+
+    def test_hook_reads_the_variable(self):
+        self.assertEqual(ar.agent_home("claude", {"CLAUDE_CONFIG_DIR": "/x/.claude2"}), "/x/.claude2")
+        self.assertEqual(ar.agent_home("claude", {"CLAUDE_CONFIG_DIR": "~/.claude2"}), os.path.expanduser("~/.claude2"))
+        self.assertEqual(ar.agent_home("codex", {"CODEX_HOME": "/x/.codex2"}), "/x/.codex2")
+        for agent, env in (("claude", {}), ("claude", {"CLAUDE_CONFIG_DIR": ""}), ("claude", {"CLAUDE_CONFIG_DIR": "rel"}),
+                           ("claude", {"CODEX_HOME": "/x"}), ("grok", {"CLAUDE_CONFIG_DIR": "/x"})):
+            self.assertIsNone(ar.agent_home(agent, env), (agent, env))
+
+    def test_remember_writes_it_on_the_label(self):
+        with mock.patch.object(ar, "hc") as hc, mock.patch.object(ar, "proc_argv", return_value=None), \
+             mock.patch.object(ar, "boot_id", return_value=BOOT):
+            ar.remember("t7", "claude", SID, "/work", "/t/x.jsonl", 40, 30, watcher=False, home=self.HOME)
+            ar.remember("t8", "claude", SID2, "/work", "/t/y.jsonl", 41, 31, watcher=False)
+        saved = [json.loads(call.args[0][2].split("=", 1)[1]) for call in hc.call_args_list]
+        self.assertEqual(saved[0]["env"], {"CLAUDE_CONFIG_DIR": self.HOME})
+        self.assertNotIn("env", saved[1])
+        self.assertEqual(ar.read_label({ar.LABEL: json.dumps(saved[0])})["env"], {"CLAUDE_CONFIG_DIR": self.HOME})
+
+
 class LostTests(unittest.TestCase):
     def test_same_program_same_boot_is_not_lost(self):
         self.assertFalse(ar.lost({"pid": 100}, label(shell=100), BOOT))
@@ -466,7 +513,13 @@ class HookTests(unittest.TestCase):
              mock.patch.object(ar, "placement", return_value="direct"), \
              mock.patch.object(ar, "remember") as remember:
             self.assertEqual(ar.hook("codex", self.payload(), env={**self.ENV, "CODEX_THREAD_ID": SID}), "saved")
-        remember.assert_called_once_with("t7", "codex", SID, "/work", "/t/x.jsonl", 40, 30)
+        remember.assert_called_once_with("t7", "codex", SID, "/work", "/t/x.jsonl", 40, 30, home=None)
+        with mock.patch.object(ar, "find_agent", return_value=40), \
+             mock.patch.object(ar, "hc_json", return_value={"state": "live", "pid": 30}), \
+             mock.patch.object(ar, "placement", return_value="direct"), \
+             mock.patch.object(ar, "remember") as remember:
+            self.assertEqual(ar.hook("claude", self.payload(), env={**self.ENV, "CLAUDE_CONFIG_DIR": "/h/.claude2"}), "saved")
+        self.assertEqual(remember.call_args.kwargs, {"home": "/h/.claude2"})
 
     def saved(self, agent, raw, env=None):
         with mock.patch.object(ar, "find_agent", return_value=40), \
@@ -480,7 +533,7 @@ class HookTests(unittest.TestCase):
         outcome, remember = self.saved("grok", json.dumps({
             "hookEventName": "session_start", "sessionId": SID, "cwd": "/work", "transcriptPath": "/t/x.jsonl"}))
         self.assertEqual(outcome, "saved")
-        remember.assert_called_once_with("t7", "grok", SID, "/work", "/t/x.jsonl", 40, 30)
+        remember.assert_called_once_with("t7", "grok", SID, "/work", "/t/x.jsonl", 40, 30, home=None)
 
         outcome, remember = self.saved("grok", json.dumps({"hook_event_name": "SessionStart", "cwd": "/work"}),
                                        env={"GROK_SESSION_ID": SID})
@@ -490,7 +543,7 @@ class HookTests(unittest.TestCase):
         outcome, remember = self.saved("agy", json.dumps({
             "conversationId": SID, "workspacePaths": ["/work"], "transcriptPath": "/t/x.jsonl"}))
         self.assertEqual(outcome, "saved")
-        remember.assert_called_once_with("t7", "agy", SID, "/work", "/t/x.jsonl", 40, 30)
+        remember.assert_called_once_with("t7", "agy", SID, "/work", "/t/x.jsonl", 40, 30, home=None)
 
         outcome, remember = self.saved("agy", json.dumps({
             "hookEventName": "PreInvocation", "conversationId": SID, "workspacePaths": ["/repo"],
@@ -500,7 +553,7 @@ class HookTests(unittest.TestCase):
 
         outcome, remember = self.saved("pi", self.payload())
         self.assertEqual(outcome, "saved")
-        remember.assert_called_once_with("t7", "pi", SID, "/work", "/t/x.jsonl", 40, 30)
+        remember.assert_called_once_with("t7", "pi", SID, "/work", "/t/x.jsonl", 40, 30, home=None)
 
         outcome, remember = self.saved("kiro", json.dumps({
             "hook_event_name": "SessionStart", "session_id": "sess_" + SID, "cwd": "/proj"}))
